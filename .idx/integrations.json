@@ -1,0 +1,6 @@
+{
+  "firebase_hosting": {
+    "deploymentHostingUrl": "https://iliad-orders.web.app"
+  },
+  "secrets_manager": {}
+}
