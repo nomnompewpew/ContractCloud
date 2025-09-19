@@ -32,31 +32,29 @@ import { Label } from './ui/label';
 import { Switch } from './ui/switch';
 import { ClientCombobox } from './client-combobox';
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from './ui/dropdown-menu';
-import { updateOrderAction, deleteOrderAction, deleteOrdersAction, bulkUpdateOrdersAction, appendFilesToContractAction } from '@/app/actions';
+import { updateOrderAction, deleteOrderAction, deleteOrdersAction, bulkUpdateOrdersAction, appendFilesToContractAction, getPagedOrdersAction } from '@/app/actions';
+import { usePagination } from '@/hooks/use-pagination';
+import { Pagination } from './ui/pagination';
 
 const allStations = [
     'KQBL', 'KWYD', 'KZMG', 'KSRV', 'KQBL HD2', 'KKOO', 'KSRV HD-2', 'KQBL HD3', 
     'KIRQ', 'KYUN', 'KTPZ', 'KIKX', 'KYUN-HD2', 'KYUN-HD3', 'Digital'
 ].sort();
 
+const PAGE_SIZE = 50;
+
 interface OrdersTabProps {
-  orders: Order[];
-  setOrders: React.Dispatch<React.SetStateAction<Order[]>>;
+  initialOrders: Order[];
+  setInitialOrders: React.Dispatch<React.SetStateAction<Order[]>>;
   isLoading: boolean;
-  hasMore: boolean;
-  onLoadMore: (options: { includeArchived: boolean, includeOlder: boolean }) => void;
-  onViewChange: (options: { includeArchived: boolean, includeOlder: boolean }) => void;
-  initialFetch: () => void;
+  setIsLoading: React.Dispatch<React.SetStateAction<boolean>>;
 }
 
 export function OrdersTab({
-  orders,
-  setOrders,
+  initialOrders,
+  setInitialOrders,
   isLoading,
-  hasMore,
-  onLoadMore,
-  onViewChange,
-  initialFetch
+  setIsLoading
 }: OrdersTabProps) {
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -73,30 +71,97 @@ export function OrdersTab({
   const [isAppendDialogOpen, setIsAppendDialogOpen] = useState(false);
   const [orderToAppend, setOrderToAppend] = useState<Order | null>(null);
 
-  // Initial fetch and refetch when view options change
-  useEffect(() => {
-    // Only call initial fetch if orders haven't been loaded yet.
-    if(orders.length === 0) {
-      initialFetch();
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  const [orders, setOrders] = useState<Order[]>(initialOrders);
+  
+  const {
+      currentPage,
+      setCurrentPage,
+      pageCursors,
+      setPageCursors,
+      totalPages,
+      setTotalPages
+  } = usePagination({ pageSize: PAGE_SIZE });
+
 
   useEffect(() => {
-    onViewChange({ includeArchived: searchArchived, includeOlder: showOlder });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchArchived, showOlder]);
-  
-  const handleLoadMore = () => {
-    if (hasMore && !isLoading) {
-      onLoadMore({ includeArchived: searchArchived, includeOlder: showOlder });
+    setOrders(initialOrders);
+    // Reset pagination when initial orders change (e.g. on view change)
+    setCurrentPage(1);
+    setPageCursors({ 1: undefined });
+    // A rough estimation of total pages, can be refined.
+    if(initialOrders.length > 0) {
+        setTotalPages(Math.ceil(initialOrders.length / PAGE_SIZE) + (initialOrders.length === PAGE_SIZE ? 1: 0));
+    }
+  }, [initialOrders, setCurrentPage, setPageCursors, setTotalPages]);
+
+  const fetchPage = useCallback(async (page: number, options: {
+      searchTerm?: string;
+      searchDate?: Date;
+      includeArchived: boolean;
+      includeOlder: boolean;
+  }) => {
+      setIsLoading(true);
+      const startAfterId = pageCursors[page];
+      
+      const result = await getPagedOrdersAction({
+          limit: PAGE_SIZE,
+          startAfterId,
+          searchQuery: options.searchTerm,
+          searchDate: options.searchDate ? format(options.searchDate, 'yyyy-MM-dd') : undefined,
+          includeArchived: options.includeArchived,
+          includeOlder: options.includeOlder,
+      });
+
+      if (result.success && result.data) {
+          setOrders(result.data);
+          if (result.data.length > 0) {
+              const nextCursor = result.data[result.data.length - 1].id;
+              setPageCursors(prev => ({ ...prev, [page + 1]: nextCursor }));
+          }
+          if(result.data.length < PAGE_SIZE) {
+            setTotalPages(page); // We've reached the end
+          } else {
+            setTotalPages(page + 1); // There might be more
+          }
+      } else {
+          toast({ variant: 'destructive', title: 'Error fetching page', description: result.error });
+      }
+      setIsLoading(false);
+  }, [pageCursors, setIsLoading, setPageCursors, setTotalPages, toast]);
+
+  const handlePageChange = (newPage: number) => {
+    if (newPage > 0 && newPage <= totalPages) {
+        setCurrentPage(newPage);
+        fetchPage(newPage, { includeArchived: searchArchived, includeOlder: showOlder, searchTerm });
     }
   };
   
+  const handleViewChange = () => {
+    fetchPage(1, { includeArchived: searchArchived, includeOlder: showOlder, searchTerm });
+  };
+  
+  useEffect(() => {
+    handleViewChange();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchArchived, showOlder]);
+  
+  const handleSearch = () => {
+     setCurrentPage(1);
+     setPageCursors({ 1: undefined });
+     fetchPage(1, { searchTerm, searchDate, includeArchived, includeOlder });
+  }
+
+  const clearSearch = () => {
+      setSearchTerm('');
+      setSearchDate(undefined);
+      setCurrentPage(1);
+      setPageCursors({ 1: undefined });
+      setInitialOrders([]); // Trigger a refetch of the initial view
+  }
+  
   const existingClients = useMemo(() => {
     const clientNames = orders.map(o => o.client).filter(Boolean);
-    const unique = [...new Set(clientNames)].sort((a, b) => a.localeCompare(b));
-    return unique;
+    return [...new Set(clientNames)].sort((a, b) => a.localeCompare(b));
   }, [orders]);
   
   const handleUpdateOrder = async (orderId: string, updatedFields: Partial<Omit<Order, 'id'>>) => {
@@ -141,10 +206,6 @@ export function OrdersTab({
     });
   };
 
-  const handleFilterClick = (filterValue: string) => {
-    setSearchTerm(filterValue);
-  };
-
   const handlePreviewClick = (order: Order) => {
     if (order.pdfUrl) {
       window.open(order.pdfUrl, '_blank');
@@ -181,52 +242,11 @@ export function OrdersTab({
       toast({ variant: 'destructive', title: 'Bulk Deletion Failed', description: result.error });
     }
   };
-
-  const displayedOrders = useMemo(() => {
-    const hasSearchTerm = searchTerm.trim() !== '';
-    const hasSearchDate = !!searchDate;
-    
-    if (!hasSearchTerm && !hasSearchDate) {
-      return orders;
-    }
-
-    const lowercasedFilter = searchTerm.toLowerCase().trim();
-
-    return orders.filter((order) => {
-      const textMatch =
-        !hasSearchTerm ||
-        order.client.toLowerCase().includes(lowercasedFilter) ||
-        (order.agency || '').toLowerCase().includes(lowercasedFilter) ||
-        order.contractNumber.toLowerCase().includes(lowercasedFilter) ||
-        (order.estimateNumber || '').toLowerCase().includes(lowercasedFilter) ||
-        order.stations.join(' ').toLowerCase().includes(lowercasedFilter) ||
-        order.market.toLowerCase().includes(lowercasedFilter) ||
-        (order.contractType || '').toLowerCase().includes(lowercasedFilter) ||
-        order.finalFileName.toLowerCase().includes(lowercasedFilter) ||
-        order.status.toLowerCase().includes(lowercasedFilter);
-
-      const dateMatch = !hasSearchDate || (
-          order.orderEntryDate.getFullYear() === searchDate.getFullYear() &&
-          order.orderEntryDate.getMonth() === searchDate.getMonth() &&
-          order.orderEntryDate.getDate() === searchDate.getDate()
-      );
-
-      return textMatch && dateMatch;
-    });
-  }, [searchTerm, searchDate, orders]);
-
-  const handleDeleteFiltered = () => {
-    const idsToDelete = displayedOrders.map(o => o.id);
-    if (idsToDelete.length > 0) {
-        onDeleteOrders(idsToDelete);
-    }
-  };
   
   const onBulkUpdateOrders = async (orderIds: string[], updatedFields: Partial<Omit<Order, 'id'>>) => {
      const result = await bulkUpdateOrdersAction(orderIds, updatedFields, searchArchived);
     if(result.success) {
-       // A full refetch might be easier than patching state here
-       onViewChange({ includeArchived, includeOlder: showOlder });
+       handleViewChange(); // Refetch current page
       toast({ title: 'Bulk Update Successful', description: `${orderIds.length} orders updated.` });
     } else {
       toast({ variant: 'destructive', title: 'Bulk Update Failed', description: result.error });
@@ -234,7 +254,7 @@ export function OrdersTab({
   }
 
   const handleBulkUpdate = (updatedFields: Partial<Omit<Order, 'id'>>) => {
-    const idsToUpdate = displayedOrders.map(o => o.id);
+    const idsToUpdate = orders.map(o => o.id); // Applies to currently visible page
     if (idsToUpdate.length > 0) {
       onBulkUpdateOrders(idsToUpdate, updatedFields);
     }
@@ -290,12 +310,9 @@ export function OrdersTab({
   const hasActiveFilter = searchTerm.trim() !== '' || !!searchDate;
   
   const getCardDescription = () => {
-      let baseText = hasActiveFilter ? `Showing ${displayedOrders.length} matching results.` : `Showing ${orders.length} results.`;
-      
-      if (searchArchived) return `${baseText} Searching the archive.`;
-      if (showOlder) return `${baseText} Searching all current orders.`;
-      
-      return `${baseText} Searching recent orders.`
+      if (searchArchived) return `Searching the archive.`;
+      if (showOlder) return `Searching all current orders.`;
+      return `Searching recent orders from the last year.`
   }
 
   return (
@@ -330,6 +347,7 @@ export function OrdersTab({
                 placeholder="Search by Client, Filename, Contract #..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
+                onKeyDown={(e) => { if(e.key === 'Enter') handleSearch() }}
                 className="w-full pl-10"
               />
             </div>
@@ -355,37 +373,41 @@ export function OrdersTab({
                 />
               </PopoverContent>
             </Popover>
-            {(hasActiveFilter || isLoading) && (
-               <Button variant="ghost" size="icon" onClick={() => { setSearchTerm(''); setSearchDate(undefined); }} className="h-10 w-10 sm:h-9 sm:w-9 flex-shrink-0">
+            <Button onClick={handleSearch} disabled={isLoading}>
+                <Search className="mr-2 h-4 w-4" />
+                Search
+            </Button>
+            {hasActiveFilter && (
+               <Button variant="ghost" size="icon" onClick={clearSearch} className="h-10 w-10 flex-shrink-0">
                   <X className="h-4 w-4" />
                   <span className="sr-only">Clear filters</span>
                </Button>
             )}
-            {hasActiveFilter && displayedOrders.length > 0 && (
+            {orders.length > 0 && (
                 <div className="flex gap-2 w-full sm:w-auto">
                     <Button variant="outline" onClick={() => setIsBulkEditDialogOpen(true)} className="flex-1 sm:flex-none">
                         <Pencil className="mr-2 h-4 w-4" />
-                        Edit ({displayedOrders.length})
+                        Edit Page ({orders.length})
                     </Button>
                     <AlertDialog>
                         <AlertDialogTrigger asChild>
                             <Button variant="destructive" className="flex-1 sm:flex-none">
                                 <Trash2 className="mr-2 h-4 w-4" />
-                                Delete ({displayedOrders.length})
+                                Delete Page ({orders.length})
                             </Button>
                         </AlertDialogTrigger>
                         <AlertDialogContent>
                             <AlertDialogHeader>
                                 <AlertDialogTitle>Are you absolutely sure?</AlertDialogTitle>
                                 <AlertDialogDescription>
-                                    This will permanently delete the ${"{"}displayedOrders.length} currently filtered order(s). This action cannot be undone.
+                                    This will permanently delete all {orders.length} order(s) currently visible on this page. This action cannot be undone.
                                 </AlertDialogDescription>
                             </AlertDialogHeader>
                             <AlertDialogFooter>
                                 <AlertDialogCancel>Cancel</AlertDialogCancel>
                                 <AlertDialogAction
                                     className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                                    onClick={handleDeleteFiltered}
+                                    onClick={() => onDeleteOrders(orders.map(o => o.id))}
                                 >
                                     Delete
                                 </AlertDialogAction>
@@ -397,7 +419,7 @@ export function OrdersTab({
           </div>
 
           <div className="rounded-md border relative min-h-[400px]">
-             {isLoading && orders.length === 0 && (
+             {isLoading && (
               <div className="absolute inset-0 bg-background/50 backdrop-blur-sm flex items-center justify-center z-10">
                 <Loader2 className="h-8 w-8 animate-spin text-primary" />
               </div>
@@ -417,8 +439,8 @@ export function OrdersTab({
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {displayedOrders.length > 0 ? (
-                  displayedOrders.map((order) => {
+                {orders.length > 0 ? (
+                  orders.map((order) => {
                     const lastModification = order.modifications && order.modifications.length > 0 ? order.modifications.slice(-1)[0] : null;
                     return (
                     <TableRow key={order.id} className={cn(editingOrderId === order.id && "bg-muted/50")}>
@@ -439,8 +461,8 @@ export function OrdersTab({
                           </div>
                         ) : (
                           <div className="flex flex-col gap-0.5">
-                            <button onClick={() => handleFilterClick(order.client)} className="text-left font-medium hover:underline p-0 bg-transparent h-auto">{order.client}</button>
-                            <button onClick={() => handleFilterClick(order.agency)} className="text-left text-sm text-muted-foreground hover:underline p-0 bg-transparent h-auto">{order.agency || 'N/A'}</button>
+                            <span className="font-medium">{order.client}</span>
+                            <span className="text-sm text-muted-foreground">{order.agency || 'N/A'}</span>
                           </div>
                         )}
                       </TableCell>
@@ -462,8 +484,8 @@ export function OrdersTab({
                             </div>
                          ) : (
                             <div className="flex flex-col gap-0.5">
-                              <button onClick={() => handleFilterClick(order.contractNumber)} className="text-left hover:underline p-0 bg-transparent h-auto">{order.contractNumber}</button>
-                              <button onClick={() => handleFilterClick(order.estimateNumber || '')} className="text-left text-sm text-muted-foreground hover:underline p-0 bg-transparent h-auto">{order.estimateNumber || 'N/A'}</button>
+                              <span>{order.contractNumber}</span>
+                              <span className="text-sm text-muted-foreground">{order.estimateNumber || 'N/A'}</span>
                             </div>
                          )}
                       </TableCell>
@@ -476,7 +498,7 @@ export function OrdersTab({
                               placeholder="Filename"
                             />
                         ) : (
-                          <div onClick={() => handleFilterClick(order.finalFileName)} className="text-sm text-muted-foreground max-w-xs truncate cursor-pointer hover:underline">
+                          <div className="text-sm text-muted-foreground max-w-xs truncate">
                             {order.finalFileName}
                           </div>
                         )}
@@ -497,9 +519,8 @@ export function OrdersTab({
                               </Select>
                           ) : (
                                <Badge
-                                  onClick={() => handleFilterClick(order.market)}
                                   variant="outline"
-                                  className="capitalize cursor-pointer"
+                                  className="capitalize"
                                 >
                                   {order.market}
                                 </Badge>
@@ -529,8 +550,6 @@ export function OrdersTab({
                                 ? 'destructive'
                                 : 'secondary'
                             }
-                            className="cursor-pointer"
-                            onClick={() => handleFilterClick(order.contractType || 'Original')}
                           >
                             {order.contractType || 'Original'}
                           </Badge>
@@ -592,7 +611,7 @@ export function OrdersTab({
                               </PopoverContent>
                           </Popover>
                         ) : (
-                          <button onClick={() => setSearchDate(order.orderEntryDate)} className="text-left hover:underline p-0 bg-transparent h-auto">{format(order.orderEntryDate, 'P')}</button>
+                          <span>{format(order.orderEntryDate, 'P')}</span>
                         )}
                       </TableCell>
                        <TableCell>
@@ -665,30 +684,26 @@ export function OrdersTab({
                 ) : (
                   <TableRow>
                     <TableCell colSpan={9} className="h-24 text-center">
-                      {!isLoading && (hasActiveFilter 
-                        ? "No results found for your search criteria."
-                        : `No contracts found for the selected view.`
-                      )}
+                      {!isLoading && "No results found."}
                     </TableCell>
                   </TableRow>
                 )}
               </TableBody>
             </Table>
           </div>
-           {hasMore && !hasActiveFilter && (
-            <div className="flex justify-center mt-4">
-              <Button onClick={handleLoadMore} disabled={isLoading}>
-                {isLoading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                Load More
-              </Button>
-            </div>
-          )}
+          <div className="flex justify-center mt-4">
+              <Pagination
+                currentPage={currentPage}
+                totalPages={totalPages}
+                onPageChange={handlePageChange}
+              />
+          </div>
         </CardContent>
       </Card>
       <BulkEditDialog
         isOpen={isBulkEditDialogOpen}
         onOpenChange={setIsBulkEditDialogOpen}
-        ordersCount={displayedOrders.length}
+        ordersCount={orders.length}
         onBulkUpdate={handleBulkUpdate}
       />
       {orderToAppend && (
@@ -703,5 +718,3 @@ export function OrdersTab({
     </>
   );
 }
-
-    

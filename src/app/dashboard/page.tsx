@@ -71,8 +71,6 @@ export type MarketCorrectionInfo = {
     isArchived: boolean;
 };
 
-const PAGE_SIZE = 50;
-
 export default function DashboardPage() {
   const { user, loading: authLoading } = useAuth();
   const router = useRouter();
@@ -81,26 +79,13 @@ export default function DashboardPage() {
   const [activeTab, setActiveTab] = useState('contract-entry');
   const [orders, setOrders] = useState<Order[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [hasMore, setHasMore] = useState(true);
-
-  const fetchOrders = useCallback(async (options: {
-      limit: number;
-      startAfterId?: string;
-      includeArchived: boolean;
-      includeOlder: boolean;
-      reset?: boolean;
-  }) => {
+  
+  const initialFetch = useCallback(async () => {
     setIsLoading(true);
     try {
-      const result = await getPagedOrdersAction(options);
-
+      const result = await getPagedOrdersAction({ limit: 50, includeArchived: false, includeOlder: false });
       if (result.success && result.data) {
-        if (options.reset) {
-          setOrders(result.data);
-        } else {
-          setOrders(prev => [...prev, ...result.data!]);
-        }
-        setHasMore(result.data.length === options.limit);
+        setOrders(result.data);
       } else {
         toast({ variant: 'destructive', title: 'Error fetching orders', description: result.error });
       }
@@ -110,13 +95,15 @@ export default function DashboardPage() {
       setIsLoading(false);
     }
   }, [toast]);
-  
+
 
   useEffect(() => {
     if (!authLoading && !user) {
       router.push('/');
+    } else if (user) {
+      initialFetch();
     }
-  }, [user, authLoading, router]);
+  }, [user, authLoading, router, initialFetch]);
 
   const existingClients = useMemo(() => {
     const clientNames = orders.map(o => o.client).filter(Boolean);
@@ -158,20 +145,6 @@ export default function DashboardPage() {
     }
   };
   
-  const handleLoadMore = useCallback((options: { includeArchived: boolean, includeOlder: boolean }) => {
-    if (hasMore && !isLoading && orders.length > 0) {
-      fetchOrders({
-        ...options,
-        limit: PAGE_SIZE,
-        startAfterId: orders[orders.length - 1].id,
-      });
-    }
-  }, [hasMore, isLoading, orders, fetchOrders]);
-
-  const handleViewChange = useCallback((options: { includeArchived: boolean, includeOlder: boolean }) => {
-    fetchOrders({ ...options, limit: PAGE_SIZE, reset: true });
-  }, [fetchOrders]);
-
   if (authLoading || !user) {
     return (
       <div className="flex min-h-screen w-full items-center justify-center">
@@ -211,13 +184,10 @@ export default function DashboardPage() {
             </TabsContent>
             <TabsContent value="orders">
               <OrdersTab
-                orders={orders}
-                setOrders={setOrders}
+                initialOrders={orders}
+                setInitialOrders={setOrders}
                 isLoading={isLoading}
-                hasMore={hasMore}
-                onLoadMore={handleLoadMore}
-                onViewChange={handleViewChange}
-                initialFetch={() => fetchOrders({ limit: PAGE_SIZE, includeArchived: false, includeOlder: false, reset: true })}
+                setIsLoading={setIsLoading}
               />
             </TabsContent>
           </Tabs>
@@ -226,4 +196,3 @@ export default function DashboardPage() {
   );
 }
 
-    

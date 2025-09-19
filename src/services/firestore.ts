@@ -84,55 +84,68 @@ export async function getPagedOrders(options: {
   startAfterId?: string;
   includeArchived: boolean;
   includeOlder: boolean;
+  searchQuery?: string;
+  searchDate?: string;
 }): Promise<Order[]> {
-  const { limit: limitValue, startAfterId, includeArchived, includeOlder } = options;
+  const { limit: limitValue, startAfterId, includeArchived, includeOlder, searchQuery, searchDate } = options;
 
-  let collectionRef = ordersCollectionRef;
-  if (includeArchived) {
-    collectionRef = archivedOrdersCollectionRef;
+  const collections = includeArchived
+    ? [archivedOrdersCollectionRef]
+    : includeOlder
+    ? [ordersCollectionRef, archivedOrdersCollectionRef]
+    : [ordersCollectionRef];
+
+  const allResults: Order[] = [];
+
+  for (const collectionRef of collections) {
+    if (allResults.length >= limitValue) break;
+
+    const queryConstraints: any[] = [];
+
+    // Date constraints
+    if (!includeOlder && !includeArchived && !searchDate) {
+      const startDate = subDays(new Date(), 365);
+      queryConstraints.push(where('orderEntryDate', '>=', startDate));
+    } else if (searchDate) {
+      const { start, end } = getUtcRangeFromDateString(searchDate);
+      queryConstraints.push(where('orderEntryDate', '>=', start));
+      queryConstraints.push(where('orderEntryDate', '<=', end));
+    }
+    
+    // Search query constraint - very basic, searches multiple fields.
+    // Firestore does not support case-insensitive or partial text search natively.
+    // This is a limitation. A more robust solution requires a third-party service like Algolia.
+    if(searchQuery){
+      // Since we can't do an OR query on different fields, we will have to run multiple queries and merge.
+      // This is not ideal for performance. For this app, we will just search the client field.
+      // A more robust implementation is outside the scope of this fix.
+      queryConstraints.push(where('client', '>=', searchQuery));
+      queryConstraints.push(where('client', '<=', searchQuery + '\uf8ff'));
+    }
+
+    queryConstraints.push(orderBy('orderEntryDate', 'desc'));
+    
+    if (startAfterId) {
+      const docRef = doc(db, collectionRef.path, startAfterId);
+      const docSnap = await getDoc(docRef);
+      if (docSnap.exists()) {
+        queryConstraints.push(startAfter(docSnap));
+      }
+    }
+
+    queryConstraints.push(limit(limitValue - allResults.length));
+
+    const q = query(collectionRef, ...queryConstraints);
+    const snapshot = await getDocs(q);
+    allResults.push(...snapshot.docs.map(toOrder));
   }
 
-  const queryConstraints = [];
-
-  if (!includeOlder && !includeArchived) {
-    const startDate = subDays(new Date(), 365);
-    queryConstraints.push(where('orderEntryDate', '>=', startDate));
-  }
-
-  queryConstraints.push(orderBy('orderEntryDate', 'desc'));
+  // Final sort after merging results from different collections
+  allResults.sort((a, b) => b.orderEntryDate.getTime() - a.orderEntryDate.getTime());
   
-  if (startAfterId) {
-    const docRef = doc(db, collectionRef.path, startAfterId);
-    const docSnap = await getDoc(docRef);
-    if (docSnap.exists()) {
-      queryConstraints.push(startAfter(docSnap));
-    }
-  }
-
-  queryConstraints.push(limit(limitValue));
-
-  const q = query(collectionRef, ...queryConstraints);
-
-  const snapshot = await getDocs(q);
-  return snapshot.docs.map(toOrder);
+  return allResults.slice(0, limitValue);
 }
 
-
-export async function getOrdersByClient(clientName: string): Promise<Order[]> {
-    const allOrders: Order[] = [];
-    const collectionsToQuery = [ordersCollectionRef, archivedOrdersCollectionRef];
-
-    for (const coll of collectionsToQuery) {
-        const q = query(coll, where('client', '==', clientName));
-        const snapshot = await getDocs(q);
-        allOrders.push(...snapshot.docs.map(toOrder));
-    }
-    
-    // Sort in-app instead of in the query
-    allOrders.sort((a, b) => b.orderEntryDate.getTime() - a.orderEntryDate.getTime());
-    
-    return allOrders;
-}
 
 export async function getOrderById(orderId: string, collectionName: 'orders' | 'archived_orders'): Promise<Order | null> {
     const orderRef = doc(db, collectionName, orderId);

@@ -247,6 +247,8 @@ export async function getPagedOrdersAction(options: {
   startAfterId?: string;
   includeArchived: boolean;
   includeOlder: boolean;
+  searchQuery?: string;
+  searchDate?: string;
 }) {
   try {
     const result = await getPagedOrders(options);
